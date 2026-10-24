@@ -56,6 +56,17 @@ jobs:
             --ExecutePreprocessor.timeout=1800 \
             Semana_1SINC.ipynb
 
+      - name: Ejecutar Semana_2SINC.ipynb
+        working-directory: src/sincronicas
+        run: |
+          source ../../.venv/bin/activate
+          jupyter nbconvert \
+            --to notebook \
+            --execute \
+            --inplace \
+            --ExecutePreprocessor.timeout=1800 \
+            Semana_2SINC.ipynb
+
       - name: Confirmar cambios generados
         run: |
           git config user.name "github-actions[bot]"
