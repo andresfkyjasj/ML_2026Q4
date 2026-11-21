@@ -6,3 +6,7 @@ datasets
 nbconvert
 matplotlib
 scikit-learn
+torch
+tokenizers
+streamlit>=1.50
+plotly>=5.24 
