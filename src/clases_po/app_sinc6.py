@@ -1,9 +1,10 @@
 """App web: mantenimiento predictivo con redes neuronales (Semana 7).
 
 Ejecutar en local (desde la raíz del repositorio):
-    streamlit run src/clases_po/app_mantenimiento.py
+    streamlit run src/clases_po/app_sinc6.py
+    (o también: python src/clases_po/app_sinc6.py, que relanza con Streamlit)
 
-En Streamlit Community Cloud: Main file path = src/clases_po/app_mantenimiento.py
+En Streamlit Community Cloud: Main file path = src/clases_po/app_sinc6.py
 """
 import sys
 from pathlib import Path
@@ -30,4 +31,13 @@ def cargar_modelo() -> RedNeuronalMantenimiento:
         return RedNeuronalMantenimiento.entrenar_desde_cero(RUTA_DATOS)
 
 
-FrontendRedNeuronal(cargar_modelo()).render()
+if __name__ == "__main__":
+    from streamlit import runtime
+
+    if runtime.exists():                                  # ya se está ejecutando con `streamlit run`
+        FrontendRedNeuronal(cargar_modelo()).render()
+    else:                                                 # se lanzó con `python app_sinc6.py`: relanzar con Streamlit
+        from streamlit.web import cli as stcli
+
+        sys.argv = ["streamlit", "run", str(Path(__file__).resolve()), *sys.argv[1:]]
+        sys.exit(stcli.main())

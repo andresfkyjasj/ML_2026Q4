@@ -12,11 +12,11 @@ import numpy as np
 import pandas as pd
 
 try:                                    # dentro del paquete clases_po (notebook)
-    from .red_neuronal import (MODOS_FALLA, RANGOS, TIPOS, VARIABLES_BASE,
-                               RedNeuronalMantenimiento, agregar_variables)
+    from .red_neuronal import (MODOS_FALLA, PSI_ALERTA, RANGOS, TIPOS, TURNOS, VARIABLES_BASE,
+                               RedNeuronalMantenimiento, agregar_variables, semaforo_psi)
 except ImportError:                     # como módulo suelto (app de Streamlit)
-    from red_neuronal import (MODOS_FALLA, RANGOS, TIPOS, VARIABLES_BASE,  # type: ignore
-                              RedNeuronalMantenimiento, agregar_variables)
+    from red_neuronal import (MODOS_FALLA, PSI_ALERTA, RANGOS, TIPOS, TURNOS, VARIABLES_BASE,  # type: ignore
+                              RedNeuronalMantenimiento, agregar_variables, semaforo_psi)
 
 COLOR = {"ok": "#2a9d8f", "falla": "#e63946", "neutro": "#8d99ae", "acento": "#eb6834",
          "texto": "#1f1f1e", "medio": "#f4a261"}
@@ -65,6 +65,15 @@ def _layout(fig, titulo: str, alto: int = 380):
 
 def _dinero(x: float) -> str:
     return f"US$ {x:,.0f}"
+
+
+def _dinero_corto(x: float) -> str:
+    """Formato compacto para las tarjetas de indicadores (no se corta en pantallas angostas)."""
+    if abs(x) >= 1e6:
+        return f"US$ {x / 1e6:,.2f} M"
+    if abs(x) >= 1e4:
+        return f"US$ {x / 1e3:,.0f} mil"
+    return _dinero(x)
 
 
 class FrontendRedNeuronal:
@@ -230,16 +239,17 @@ class FrontendRedNeuronal:
         fig.update_yaxes(title_text="Precisión", row=1, col=2)
         return _layout(fig, "", 380)
 
-    def figura_deteccion_modos(self, modelo: RedNeuronalMantenimiento | None = None):
+    def figura_deteccion_modos(self, modelo: RedNeuronalMantenimiento | None = None,
+                               tabla: pd.DataFrame | None = None, titulo: str = "¿Qué tipo de falla anticipa la red? (prueba)"):
         go = _go()
-        d = (modelo or self.modelo).deteccion_por_modo()
+        d = (modelo or self.modelo).deteccion_por_modo() if tabla is None else tabla
         if d.empty:
             return None
         fig = go.Figure(go.Bar(x=d["descripción"], y=d["% detectado"], marker_color=COLOR["acento"],
                                text=[f"{p:.0f}% ({a}/{c})" for p, a, c in zip(d["% detectado"], d["detectados"], d["casos"])],
                                textposition="outside"))
         fig.update_yaxes(title="% de fallas anticipadas", range=[0, 115])
-        return _layout(fig, "¿Qué tipo de falla anticipa la red? (prueba)", 360)
+        return _layout(fig, titulo, 360)
 
     @staticmethod
     def figura_medidor(prob: float, umbral: float):
@@ -266,6 +276,88 @@ class FrontendRedNeuronal:
         fig.update_xaxes(title="Probabilidad de falla (%)", range=[0, 115])
         return _layout(fig, f"Top {min(top, len(tabla))} máquinas por riesgo", 60 + 28 * min(top, len(tabla)) + 80)
 
+    # ================================================================ figuras: monitoreo en el tiempo
+    @staticmethod
+    def figura_tendencia_costos(resumen: pd.DataFrame):
+        """Costo diario sin modelo vs. con la red, y el ahorro acumulado."""
+        go = _go()
+        from plotly.subplots import make_subplots
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Bar(x=resumen["fecha"], y=resumen["costo sin modelo"], name="Costo sin modelo",
+                             marker_color=COLOR["neutro"], opacity=0.55))
+        fig.add_trace(go.Bar(x=resumen["fecha"], y=resumen["costo con modelo"], name="Costo con la red",
+                             marker_color=COLOR["acento"]))
+        fig.add_trace(go.Scatter(x=resumen["fecha"], y=resumen["ahorro"].cumsum(), name="Ahorro acumulado",
+                                 line=dict(color=COLOR["ok"], width=3)), secondary_y=True)
+        fig.update_layout(barmode="overlay")
+        fig.update_yaxes(title_text="Costo del día (US$)", tickformat=",.0f", secondary_y=False)
+        fig.update_yaxes(title_text="Ahorro acumulado (US$)", tickformat=",.0f", secondary_y=True)
+        return _layout(fig, "Costo por día: sin modelo vs. con la red", 380)
+
+    @staticmethod
+    def figura_tendencia_deteccion(resumen: pd.DataFrame, recall_ref: float | None = None):
+        """Recall y precisión por día, contra el recall que la red tuvo en la prueba."""
+        go = _go()
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=resumen["fecha"], y=resumen["recall"] * 100, name="Fallas anticipadas (recall)",
+                                 mode="lines+markers", line=dict(color=COLOR["ok"], width=3)))
+        fig.add_trace(go.Scatter(x=resumen["fecha"], y=resumen["precisión"] * 100, name="Alertas acertadas (precisión)",
+                                 mode="lines+markers", line=dict(color=COLOR["acento"], width=2)))
+        if recall_ref is not None:
+            fig.add_hline(y=recall_ref * 100, line=dict(color=COLOR["texto"], dash="dot"),
+                          annotation_text=f"recall en prueba {recall_ref:.0%}", annotation_position="bottom left")
+        fig.update_yaxes(title="%", range=[0, 105])
+        return _layout(fig, "¿La red sigue anticipando las fallas?", 360)
+
+    @staticmethod
+    def figura_alertas_turno(resumen_turno: pd.DataFrame):
+        """Máquinas a intervenir por fecha y turno."""
+        go = _go()
+        fig = go.Figure()
+        paleta = [COLOR["acento"], COLOR["medio"], COLOR["neutro"], COLOR["ok"]]
+        for i, t in enumerate(resumen_turno["turno"].unique()):
+            s = resumen_turno[resumen_turno["turno"] == t]
+            fig.add_trace(go.Bar(x=s["fecha"], y=s["intervenciones"], name=t, marker_color=paleta[i % len(paleta)]))
+        fig.update_layout(barmode="stack")
+        fig.update_yaxes(title="Máquinas a intervenir")
+        return _layout(fig, "Carga de mantenimiento por turno", 340)
+
+    @staticmethod
+    def figura_deriva(tabla_psi: pd.DataFrame):
+        """Mapa de calor del PSI: filas = variables, columnas = fechas."""
+        go = _go()
+        z = tabla_psi.T
+        fig = go.Figure(go.Heatmap(
+            z=z.values, x=[str(c) for c in z.columns], y=[ETIQUETAS.get(v, v) for v in z.index],
+            zmin=0, zmax=0.5, text=np.round(z.values, 2), texttemplate="%{text}",
+            colorscale=[[0, "#d8f3dc"], [PSI_ALERTA[0] / 0.5, "#d8f3dc"], [PSI_ALERTA[0] / 0.5, "#fdf3dc"],
+                        [PSI_ALERTA[1] / 0.5, "#fdf3dc"], [PSI_ALERTA[1] / 0.5, "#ffccd5"], [1, "#ff8fa3"]],
+            colorbar=dict(title="PSI", tickvals=[0, PSI_ALERTA[0], PSI_ALERTA[1], 0.5])))
+        return _layout(fig, "Deriva de los datos (PSI frente al entrenamiento): verde estable · amarillo vigilar · rojo deriva",
+                       60 + 34 * len(z.index) + 60)
+
+    @staticmethod
+    def figura_historial(hist: pd.DataFrame, umbral: float):
+        """Historia de una máquina: probabilidad de falla y desgaste de la herramienta, turno a turno."""
+        go = _go()
+        from plotly.subplots import make_subplots
+        x = hist["fecha"].astype(str) + " " + hist["turno"].astype(str)
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Bar(x=x, y=hist["desgaste_min"], name="Desgaste (min)", marker_color=COLOR["neutro"],
+                             opacity=0.4), secondary_y=True)
+        fig.add_trace(go.Scatter(x=x, y=hist["prob_falla"] * 100, name="Prob. de falla (%)", mode="lines+markers",
+                                 line=dict(color=COLOR["falla"], width=3)))
+        if "falla" in hist:
+            f = hist[hist["falla"] == 1]
+            fig.add_trace(go.Scatter(x=f["fecha"].astype(str) + " " + f["turno"].astype(str), y=f["prob_falla"] * 100,
+                                     mode="markers", name="Falla (si no se intervenía)",
+                                     marker=dict(symbol="x", size=13, color=COLOR["texto"])))
+        fig.add_hline(y=umbral * 100, line=dict(color=COLOR["texto"], dash="dot"), annotation_text="umbral")
+        fig.update_yaxes(title_text="Probabilidad de falla (%)", range=[0, 105], secondary_y=False)
+        fig.update_yaxes(title_text="Desgaste (min)", range=[0, 260], dtick=50, secondary_y=True)
+        fig.update_xaxes(showticklabels=False, title="turnos (pasa el mouse para ver la fecha)")
+        return _layout(fig, "Historia de la máquina: la herramienta se cambia cuando se interviene", 360)
+
     # ================================================================ texto de negocio
     @staticmethod
     def texto_respuesta(r: dict[str, Any]) -> str:
@@ -276,6 +368,174 @@ class FrontendRedNeuronal:
                 f"a **{_dinero(r['costo con modelo'])}**: un ahorro de **{_dinero(r['ahorro'])} "
                 f"({r['ahorro %']:.0%})**. **Decisión:** cada turno, detener las máquinas cuya probabilidad "
                 f"supere el umbral, empezando por las de riesgo *Crítico*.")
+
+    # ================================================================ tablero de mantenimiento
+    def bitacora_ejemplo(self, dias: int = 2, maquinas: int = 30) -> bytes:
+        """CSV de ejemplo con el formato que espera el tablero (sin la columna `falla`)."""
+        b = self.modelo.simular_operacion(dias=dias, maquinas=maquinas)
+        return b[["fecha", "turno", "maquina_id", "tipo", *VARIABLES_BASE]].to_csv(index=False).encode("utf-8")
+
+    def _render_tablero(self, st, m: RedNeuronalMantenimiento) -> None:
+        """Pestaña de monitoreo: indicadores por fecha y turno, deriva de datos y orden de trabajo."""
+        st.subheader("Tablero de mantenimiento: monitoreo por fecha y turno")
+        st.caption("La red puntúa cada lectura de cada máquina en cada turno. Aquí se vigila **qué tan bien "
+                   "anticipa las fallas**, **cuánto dinero ahorra**, si **los datos de la planta cambiaron** "
+                   "y **qué máquinas intervenir** en el turno que elijas.")
+
+        # ---------- fuente de datos
+        with st.expander("⚙️ Fuente de datos del tablero", expanded=False):
+            fuente = st.radio("Fuente", ["Simulación de la planta", "Subir bitácora (CSV)"], horizontal=True,
+                              key="tab_fuente")
+            puntuada = None
+            if fuente == "Simulación de la planta":
+                c1, c2, c3 = st.columns(3)
+                hasta = c1.date_input("Último día", pd.Timestamp.today().date(), key="tab_hasta")
+                dias = c2.slider("Días de historia", 7, 60, 14, key="tab_dias")
+                maquinas = c3.slider("Máquinas en la planta", 50, 500, 200, 50, key="tab_maquinas")
+                deriva = st.checkbox("Simular una ola de calor (deriva de datos)", key="tab_deriva",
+                                     help="Suma grados al aire y al proceso desde un día: datos que la red no vio.")
+                calor, desde = 0.0, None
+                if deriva:
+                    d1, d2 = st.columns(2)
+                    calor = d1.slider("Grados de más (K)", 1.0, 6.0, 3.0, 0.5, key="tab_calor")
+                    desde = d2.slider("Desde el día", 1, dias - 1, max(1, dias // 2), key="tab_desde")
+                inicio = pd.Timestamp(hasta) - pd.Timedelta(days=dias - 1)
+                st.caption("Simulación de ciclo cerrado: las máquinas intervenidas cambian de herramienta en el "
+                           "turno siguiente. Las fallas se marcan con las reglas documentadas de AI4I 2020.")
+
+                @st.cache_data(show_spinner="Simulando los turnos de la planta…", max_entries=8)
+                def _simular(_modelo, clave, umbral, cf, inicio, dias, maquinas, calor, desde):
+                    return _modelo.simular_operacion(fecha_inicio=inicio, dias=dias, maquinas=maquinas,
+                                                     umbral=umbral, deriva_temp_K=calor, deriva_desde_dia=desde)
+
+                puntuada = _simular(m, m.entrenado_en, m.umbral, m.costo_falla, str(inicio.date()), dias,
+                                    maquinas, calor, desde)
+            else:
+                c1, c2 = st.columns([2, 1])
+                archivo = c1.file_uploader("Bitácora de la planta (CSV)", type="csv", key="tab_csv",
+                                           help="Columnas: fecha, turno, maquina_id, tipo y los 5 sensores. "
+                                                "Si trae `falla` (0/1), el tablero valida contra la realidad.")
+                c2.download_button("⬇️ Bitácora de ejemplo", self.bitacora_ejemplo(), "bitacora_ejemplo.csv",
+                                   "text/csv")
+                if archivo is None:
+                    st.info("Sube una bitácora para ver el tablero.")
+                    return
+                try:
+                    puntuada = m.monitorear(pd.read_csv(archivo))
+                except Exception as e:
+                    st.error(f"No se pudo procesar la bitácora: {e}")
+                    return
+
+        # ---------- filtros
+        fechas = sorted(puntuada["fecha"].unique())
+        turnos = list(dict.fromkeys(puntuada["turno"]))
+        c1, c2 = st.columns([2, 2])
+        rango = c1.date_input("Periodo", (fechas[0], fechas[-1]), min_value=fechas[0], max_value=fechas[-1],
+                              key=f"tab_rango_{fechas[0]}_{fechas[-1]}")
+        f0, f1 = (rango if isinstance(rango, (tuple, list)) and len(rango) == 2 else (fechas[0], fechas[-1]))
+        sel_turnos = c2.multiselect("Turnos", turnos, turnos, key="tab_turnos") or turnos
+        d = puntuada[(puntuada["fecha"] >= f0) & (puntuada["fecha"] <= f1) & puntuada["turno"].isin(sel_turnos)]
+        if d.empty:
+            st.warning("No hay lecturas en ese periodo.")
+            return
+        con_realidad = "falla" in d.columns
+        res = m.resumen_monitoreo(d, "fecha")
+        res_turno = m.resumen_monitoreo(d, ["fecha", "turno"])
+        tabla_psi = m.deriva(d)
+
+        # ---------- semáforo
+        st.markdown("#### 🚦 Estado del modelo")
+        psi_max = tabla_psi.max()
+        rojas = psi_max[psi_max >= PSI_ALERTA[1]]
+        amarillas = psi_max[(psi_max >= PSI_ALERTA[0]) & (psi_max < PSI_ALERTA[1])]
+        if len(rojas):
+            primer_dia = {v: tabla_psi.index[tabla_psi[v] >= PSI_ALERTA[1]][0] for v in rojas.index}
+            st.error("**Deriva de datos:** " + " · ".join(f"{ETIQUETAS.get(v, v)} desde {primer_dia[v]}"
+                                                          for v in rojas.index) +
+                     ". La planta opera en condiciones que la red no vio al entrenar: revisar sensores y "
+                     "considerar reentrenar con datos recientes.")
+        elif len(amarillas):
+            st.warning("**Vigilar:** " + ", ".join(ETIQUETAS.get(v, v) for v in amarillas.index) +
+                       " cambiaron un poco frente al entrenamiento.")
+        else:
+            st.success("**Datos estables:** las variables se parecen a las del entrenamiento.")
+        recall_ref = m.evaluar("prueba")["sensibilidad (recall)"] if m.X_test is not None else None
+        if con_realidad and recall_ref is not None:
+            ult = res.tail(3)
+            vp, fn = ult["anticipadas"].sum(), ult["no anticipadas"].sum()
+            rec3 = vp / (vp + fn) if vp + fn else np.nan
+            if not np.isnan(rec3) and rec3 < recall_ref - 0.10:
+                st.error(f"**El desempeño bajó:** en los últimos 3 días se anticipó el {rec3:.0%} de las fallas "
+                         f"(en la prueba fue {recall_ref:.0%}).")
+            elif not np.isnan(rec3):
+                st.success(f"**Desempeño estable:** últimos 3 días, {rec3:.0%} de fallas anticipadas "
+                           f"(prueba: {recall_ref:.0%}).")
+
+        # ---------- indicadores del periodo (la respuesta de negocio, ahora por fechas)
+        st.markdown(f"#### 📊 Indicadores del periodo · {f0} a {f1}")
+        n, inter = int(res["lecturas"].sum()), int(res["intervenciones"].sum())
+        k = st.columns(5)
+        k[0].metric("Lecturas (máquina × turno)", f"{n:,}", f"{len(res)} días", delta_color="off")
+        k[1].metric("A intervenir", f"{inter:,}", f"{inter / n:.1%} de las lecturas", delta_color="off")
+        if con_realidad:
+            vp, fallas = int(res["anticipadas"].sum()), int(res["fallas"].sum())
+            sin, con = res["costo sin modelo"].sum(), res["costo con modelo"].sum()
+            k[2].metric("Fallas anticipadas", f"{vp / fallas:.0%}" if fallas else "—", f"{vp} de {fallas}")
+            k[3].metric("Costo con la red", _dinero_corto(con), f"sin modelo: {_dinero_corto(sin)}", delta_color="off")
+            k[4].metric("Ahorro", _dinero_corto(sin - con), f"{(sin - con) / sin:.0%}" if sin else None)
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(self.figura_tendencia_costos(res), width="stretch")
+            c2.plotly_chart(self.figura_tendencia_deteccion(res, recall_ref), width="stretch")
+        else:
+            k[2].metric("Riesgo crítico", f"{int(res['riesgo crítico'].sum()):,}")
+            k[3].metric("Costo esperado si nadie interviene", _dinero_corto(d["costo_esperado_si_opera"].sum()))
+            k[4].metric("Costo de las intervenciones", _dinero_corto(inter * m.costo_mantenimiento))
+            st.info("La bitácora no trae la columna `falla`: el tablero muestra predicciones y deriva, "
+                    "pero no puede medir recall ni ahorro real.")
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(self.figura_alertas_turno(res_turno), width="stretch")
+        modos = m.deteccion_modos_bitacora(d)
+        if not modos.empty:
+            c2.plotly_chart(self.figura_deteccion_modos(m, modos, "¿Qué fallas anticipa la red en el periodo?"),
+                            width="stretch")
+        with st.expander("Ver la tabla por fecha y turno"):
+            st.dataframe(res_turno.round(3), width="stretch", hide_index=True)
+
+        # ---------- deriva
+        st.markdown("#### 🌡️ Monitoreo de los datos")
+        st.plotly_chart(self.figura_deriva(tabla_psi), width="stretch")
+        st.caption("PSI < 0.10 estable · 0.10–0.25 vigilar · > 0.25 deriva. Ojo: el **desgaste** suele "
+                   "salir en amarillo porque el propio mantenimiento cambia las herramientas antes de que se "
+                   "gasten; es un cambio esperado, no un sensor dañado.")
+
+        # ---------- orden de trabajo del turno
+        st.markdown("#### 🧾 Orden de trabajo del turno")
+        c1, c2 = st.columns(2)
+        fechas_f = sorted(d["fecha"].unique())
+        fecha = c1.selectbox("Fecha", fechas_f, index=len(fechas_f) - 1, key="tab_fecha_ot")
+        turnos_f = list(dict.fromkeys(d.loc[d["fecha"] == fecha, "turno"]))
+        turno = c2.selectbox("Turno", turnos_f, key="tab_turno_ot")
+        lect = d[(d["fecha"] == fecha) & (d["turno"] == turno)].sort_values("prob_falla", ascending=False)
+        orden = m.orden_trabajo(d, fecha, turno)
+        a, b, c = st.columns(3)
+        a.metric("Máquinas a intervenir", f"{len(orden)} de {len(lect)}", f"{len(orden) / len(lect):.1%}",
+                 delta_color="off")
+        b.metric("Riesgo crítico", f"{int(lect['riesgo'].eq('Crítico').sum())}")
+        c.metric("Costo esperado que se evita", _dinero_corto(orden["costo_esperado_si_opera"].sum()),
+                 f"mantenimiento: {_dinero(len(orden) * m.costo_mantenimiento)}", delta_color="off")
+        st.plotly_chart(self.figura_ranking(lect), width="stretch")
+        st.dataframe(orden, width="stretch", hide_index=True,
+                     column_config={"prob_falla": st.column_config.ProgressColumn(
+                         "Prob. falla", min_value=0.0, max_value=1.0, format="%.2f")})
+        st.download_button("⬇️ Descargar orden de trabajo del turno (CSV)", orden.to_csv(index=False).encode("utf-8"),
+                           f"orden_trabajo_{fecha}_{turno}.csv", "text/csv", key="tab_descarga_ot")
+
+        # ---------- historia de una máquina
+        st.markdown("#### 🔎 Historia de una máquina")
+        ids = list(orden["maquina_id"]) + sorted(set(d["maquina_id"]) - set(orden["maquina_id"]))
+        maq = st.selectbox("Máquina", ids, key="tab_maquina")
+        hist = d[d["maquina_id"] == maq]
+        st.plotly_chart(self.figura_historial(hist, m.umbral), width="stretch")
 
     # ================================================================ app
     def render(self) -> None:
@@ -314,12 +574,12 @@ class FrontendRedNeuronal:
                     f"{r['fallas anticipadas']} de {r['fallas reales']}")
         k[1].metric("Máquinas a intervenir", f"{r['% de máquinas a intervenir']:.1%}",
                     f"{r['paradas preventivas']} paradas", delta_color="off")
-        k[2].metric("Costo sin modelo", _dinero(r["costo sin modelo"]))
-        k[3].metric("Costo con la red", _dinero(r["costo con modelo"]))
-        k[4].metric("Ahorro", _dinero(r["ahorro"]), f"{r['ahorro %']:.0%}")
+        k[2].metric("Costo sin modelo", _dinero_corto(r["costo sin modelo"]))
+        k[3].metric("Costo con la red", _dinero_corto(r["costo con modelo"]))
+        k[4].metric("Ahorro", _dinero_corto(r["ahorro"]), f"{r['ahorro %']:.0%}")
 
-        tabs = st.tabs(["🎯 Respuesta de negocio", "🔧 Probar una máquina", "📋 Validar un lote",
-                        "📈 Desempeño del modelo", "🧠 Cómo funciona la red"])
+        tabs = st.tabs(["🎯 Respuesta de negocio", "📅 Tablero de mantenimiento", "🔧 Probar una máquina",
+                        "📋 Validar un lote", "📈 Desempeño del modelo", "🧠 Cómo funciona la red"])
 
         # ---------- 1. respuesta
         with tabs[0]:
@@ -335,8 +595,12 @@ class FrontendRedNeuronal:
             if fig is not None:
                 st.plotly_chart(fig, width="stretch")
 
-        # ---------- 2. probar una máquina
+        # ---------- 2. tablero de mantenimiento (monitoreo por fechas)
         with tabs[1]:
+            self._render_tablero(st, m)
+
+        # ---------- 3. probar una máquina
+        with tabs[2]:
             st.subheader("Diagnóstico de una máquina")
             esc = st.selectbox("Cargar un escenario de ejemplo", list(ESCENARIOS), key="escenario")
             base = ESCENARIOS[esc]
@@ -375,8 +639,8 @@ class FrontendRedNeuronal:
             else:
                 st.write("✅ Ninguna variable está fuera de los rangos de riesgo conocidos.")
 
-        # ---------- 3. validar un lote
-        with tabs[2]:
+        # ---------- 4. validar un lote
+        with tabs[3]:
             st.subheader("Validar la red con un lote de máquinas")
             st.markdown("Sube un CSV con las columnas `tipo`, " + ", ".join(f"`{v}`" for v in VARIABLES_BASE) +
                         " (o con los nombres originales de AI4I 2020). Si incluye `falla` (0/1), la app "
@@ -422,8 +686,8 @@ class FrontendRedNeuronal:
                 st.download_button("⬇️ Descargar orden de trabajo (CSV)", tabla.to_csv(index=False).encode("utf-8"),
                                    "orden_trabajo_mantenimiento.csv", "text/csv")
 
-        # ---------- 4. desempeño
-        with tabs[3]:
+        # ---------- 5. desempeño
+        with tabs[4]:
             st.subheader("¿Qué tan buena es la red?")
             filas = {c: m.evaluar(c) for c in ("entrenamiento", "validación", "prueba")}
             met = pd.DataFrame(filas).T[["exactitud", "precisión", "sensibilidad (recall)", "F1", "ROC-AUC", "PR-AUC"]]
@@ -432,8 +696,8 @@ class FrontendRedNeuronal:
             st.plotly_chart(self.figura_roc_pr(), width="stretch")
             st.plotly_chart(self.figura_curva_perdida(), width="stretch")
 
-        # ---------- 5. cómo funciona
-        with tabs[4]:
+        # ---------- 6. cómo funciona
+        with tabs[5]:
             st.subheader("La red neuronal por dentro")
             st.markdown(
                 "1. **Entrada:** las 8 variables numéricas se **estandarizan** y el tipo de producto se codifica "
