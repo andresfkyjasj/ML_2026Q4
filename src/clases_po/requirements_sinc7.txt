@@ -6,3 +6,5 @@ pandas>=2.2
 numpy>=1.26
 plotly>=5.24
 scikit-learn
+torch>=2.4
+tokenizers
